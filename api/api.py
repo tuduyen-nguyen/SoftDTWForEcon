@@ -9,11 +9,12 @@ import torch
 import pandas as pd
 from dotenv import load_dotenv
 from fastapi import FastAPI, Query
+from fastapi.middleware.cors import CORSMiddleware
 
 from data.data_preprocessing import DataConfig, get_normalization_metrics
 from data.data_loader import DataLoaderS3
 from model.mlp_baseline import MLP
-
+from model.eval_model import eval_models, error
 
 logging.basicConfig(
     level=logging.INFO,
@@ -30,6 +31,20 @@ app = FastAPI(
     title="Prédiction des valeurs suivants de la série",
     description='Prédiction du traffic de taxi pour les 5 prochaines heures <br>Une version par API pour faciliter la réutilisation du modèle 🚀 <br><br><img src="https://media.vogue.fr/photos/5faac06d39c5194ff9752ec9/1:1/w_2404,h_2404,c_limit/076_CHL_126884.jpg" width="200">',  # noqa: E501
 )
+
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+device = "cpu"
+model_names = ["Modèle Soft-DTW", "Modèle MSE"]
+
 
 taxi_loader = DataLoaderS3(
     data_name="taxi",
@@ -80,20 +95,37 @@ async def predict_taxi(
         input_columns=["num_trips"],
         output_columns=["num_trips"],
     )
-    model_taxi = MLP(
+
+    models = []
+
+    model_taxi_mse = MLP(
+        input_size=20,
+        hidden_size=300,
+        output_size=5,
+        num_features=1,
+    )
+    model_taxi_dtw = MLP(
         input_size=20,
         hidden_size=300,
         output_size=5,
         num_features=1,
     )
 
-    s3_path = "tnguyen/diffusion/model_weights/taxi_weights/model_taxi_MSE.pt"
+    s3_path_mse = "tnguyen/diffusion/model_weights/taxi_weights/model_taxi_MSE.pt"
+    s3_path_dtw = (
+        "tnguyen/diffusion/model_weights/taxi_weights/model_taxi_SDTW_gamma_1.pt"
+    )
     fs = s3fs.S3FileSystem(
         client_kwargs={"endpoint_url": "https://minio.lab.sspcloud.fr"}
     )
 
-    with fs.open(s3_path, "rb") as f:
-        model_taxi.load_state_dict(torch.load(f, map_location=torch.device("cpu")))
+    with fs.open(s3_path_mse, "rb") as f:
+        model_taxi_mse.load_state_dict(torch.load(f, map_location=torch.device("cpu")))
+    with fs.open(s3_path_dtw, "rb") as f:
+        model_taxi_dtw.load_state_dict(torch.load(f, map_location=torch.device("cpu")))
+
+    models.append(model_taxi_mse)
+    models.append(model_taxi_dtw)
 
     input_array = df_taxi[
         pd.to_datetime(
@@ -116,12 +148,42 @@ async def predict_taxi(
     x_test = (x_test - x_mean) / x_std
 
     with torch.no_grad():
-        y_pred = model_taxi(x_test).detach()
-        prediction = (y_pred * y_std + y_mean).numpy().tolist()
+        y_pred_mse = model_taxi_mse(x_test).detach()
+        prediction_mse = (y_pred_mse * y_std + y_mean).numpy().tolist()
 
+        y_pred_dtw = model_taxi_dtw(x_test).detach()
+        prediction_dtw = (y_pred_dtw * y_std + y_mean).numpy().tolist()
+
+    results = eval_models(
+        models,
+        df_taxi,
+        device,
+        data_config,
+    )
+
+    mean_dtw, mean_mse, std_dtw, std_mse = error(
+        results,
+        df_taxi,
+        data_config,
+    )
+
+    # Conversion en listes Python
+    mean_dtw = np.round(mean_dtw, 3).tolist()
+    std_dtw = np.round(std_dtw, 3).tolist()
+    mean_mse = np.round(mean_mse, 3).tolist()
+    std_mse = np.round(std_mse, 3).tolist()
+
+    scores = {
+        model_names[i]: {
+            "MSE": {"mean": mean_mse[i], "std": std_mse[i]},
+            "DTW": {"mean": mean_dtw[i], "std": std_dtw[i]},
+        }
+        for i in range(len(model_names))
+    }
     return {
-        "date recue": input_date,
-        "Prédiction taxi": prediction,
+        "Date recue": {"date": input_date},
+        "Prédiction taxi": [prediction_mse, prediction_dtw],
+        "scores": scores,
     }
 
 
@@ -165,28 +227,85 @@ async def predict_weather(
             "error": "Not enough data before the selected date to generate prediction."
         }
 
-    model_weather = MLP(
+    models = []
+
+    model_weather_mse = MLP(
         data_config.input_size,
         64,
         data_config.output_size,
         len(df_meteo.columns),
     )
 
-    s3_path = "tnguyen/diffusion/model_weights/weather_weights/model_weather_MSE.pt"
+    model_weather_dtw = MLP(
+        data_config.input_size,
+        64,
+        data_config.output_size,
+        len(df_meteo.columns),
+    )
+
+    s3_path_mse = "tnguyen/diffusion/model_weights/weather_weights/model_weather_MSE.pt"
+    s3_path_dtw = (
+        "tnguyen/diffusion/model_weights/weather_weights/model_weather_SDTW_gamma_1.pt"
+    )
     fs = s3fs.S3FileSystem(
         client_kwargs={"endpoint_url": "https://minio.lab.sspcloud.fr"}
     )
-    with fs.open(s3_path, "rb") as f:
-        model_weather.load_state_dict(torch.load(f, map_location=torch.device("cpu")))
 
-    model_weather.eval()
+    print(fs.ls("tnguyen/diffusion/model_weights/weather_weights"))
+    with fs.open(s3_path_mse, "rb") as f:
+        model_weather_mse.load_state_dict(
+            torch.load(f, map_location=torch.device("cpu"))
+        )
+    with fs.open(s3_path_dtw, "rb") as f:
+        model_weather_dtw.load_state_dict(
+            torch.load(f, map_location=torch.device("cpu"))
+        )
+    model_weather_mse.eval()
+    model_weather_dtw.eval()
+
+    models.append(model_weather_mse)
+    models.append(model_weather_dtw)
 
     x_test = torch.tensor(input_array, dtype=torch.float32).unsqueeze(0)
     x_norm = (x_test - x_mean) / (x_std)
 
     with torch.no_grad():
-        y_pred = model_weather(x_norm)
-        y_pred_denorm = y_pred * y_std + y_mean
-    prediction = y_pred_denorm.squeeze(0).tolist()
+        y_pred_mse = model_weather_mse(x_norm)
+        y_pred_denorm_mse = y_pred_mse * y_std + y_mean
 
-    return {"variables_reçues": {"annee": input_date}, "prediction": prediction}
+        y_pred_dtw = model_weather_dtw(x_norm)
+        y_pred_denorm_dtw = y_pred_dtw * y_std + y_mean
+    prediction_mse = y_pred_denorm_mse.squeeze(0).tolist()
+    prediction_dtw = y_pred_denorm_dtw.squeeze(0).tolist()
+
+    results = eval_models(
+        models,
+        df_weather,
+        device,
+        data_config,
+    )
+
+    mean_dtw, mean_mse, std_dtw, std_mse = error(
+        results,
+        df_weather,
+        data_config,
+    )
+
+    # Conversion en listes Python
+    mean_dtw = np.round(mean_dtw, 3).tolist()
+    std_dtw = np.round(std_dtw, 3).tolist()
+    mean_mse = np.round(mean_mse, 3).tolist()
+    std_mse = np.round(std_mse, 3).tolist()
+
+    scores = {
+        model_names[i]: {
+            "MSE": {"mean": mean_mse[i], "std": std_mse[i]},
+            "DTW": {"mean": mean_dtw[i], "std": std_dtw[i]},
+        }
+        for i in range(len(model_names))
+    }
+    return {
+        "variables_reçues": {"annee": input_date},
+        "prediction": [prediction_mse, prediction_dtw],
+        "scores": scores,
+    }

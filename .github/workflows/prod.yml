@@ -5,6 +5,7 @@ on:
     branches:
       - main
       - docker_test
+      - quarto
   pull_request:
     branches:
       - main

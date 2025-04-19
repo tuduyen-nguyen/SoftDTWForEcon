@@ -1,0 +1,156 @@
+---
+title: "Prédiction Taxi ou Météo?"
+format:
+  html:
+    engine: observablejs
+echo: false
+---
+
+## 🧠 Prédisez le futur !
+
+
+
+```{ojs}
+viewof modele = Inputs.radio(
+  new Map([
+    ["Taxi", "taxi"],
+    ["Météo", "weather"]
+  ]),
+  {
+    value: "taxi",
+    label: html`<b>Modèle de prédiction</b>`,
+    format: ([name, value]) => {
+      const imageUrl =
+        value === "taxi"
+          ?"https://img.icons8.com/color/512/taxi.png"
+          : "https://img.icons8.com/color/512/partly-cloudy-day--v1.png";
+      return html`<div style="text-align: center;">
+        <span style="display: block; font-weight: bold;">${name}</span>
+        <img src="${imageUrl}" style="width: 100px; height: auto; margin-top: 8px;" />
+      </div>`;
+    }
+  }
+)
+```
+
+```{ojs}
+defaultDate = modele === "weather"
+  ? new Date("2016-01-01T15:00:00")
+  : new Date("2023-03-12T15:00:00")
+
+viewof date = Inputs.datetime({
+  value: defaultDate,
+  label: "Date et heure"
+})
+```
+
+<br>
+
+__Prédiction de notre modèle__:
+
+```{ojs}
+predictionUrl = {
+  if (modele === "taxi") {
+    let formatted = date.toISOString().slice(0, 19).replace("T", " ");
+    let encoded = encodeURIComponent(formatted);
+    return `https://softdtwforecon.lab.sspcloud.fr/predict_taxi?date=${encoded}`;
+  } else {
+    let d = date;
+    let formatted = `${String(d.getDate()).padStart(2, "0")}.${String(d.getMonth() + 1).padStart(2, "0")}.${d.getFullYear()} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}:00`;
+    let encoded = encodeURIComponent(formatted);
+    return `https://softdtwforecon.lab.sspcloud.fr/predict_weather?date=${encoded}`;
+  }
+}
+```
+
+
+```{ojs}
+predictionRaw = d3.json(predictionUrl)
+```
+
+```{ojs}
+
+plotDataDTW = (
+  modele === "taxi"
+    ? predictionRaw?.["Prédiction taxi"]?.[0][0] ?? []
+    : predictionRaw?.["prediction"]?.[0] ?? []
+).map((arr, i) => ({ x: i + 1, y: arr[0] }))
+```
+
+```{ojs}
+plotDataMSE = (
+  modele === "taxi"
+    ? predictionRaw?.["Prédiction taxi"]?.[1][0] ?? []
+    : predictionRaw?.["prediction"]?.[1] ?? []
+).map((arr, i) => ({ x: i + 1, y: arr[0] }))
+```
+
+```{ojs}
+(plotDataMSE.length > 0 && plotDataDTW.length > 0)
+  ? (
+    Plot.plot({
+      y: { label: modele === "taxi" ? "Courses de taxi" : "Température (°C)" },
+      x: { label: "Heures futures" },
+      color: { legend: true, label: "Modèle" },
+      marks: [
+        Plot.line(plotDataMSE.map(d => ({ ...d, modèle: "Modèle MSE" })), {
+          x: "x",
+          y: "y",
+          z: "modèle",
+          stroke: "modèle",
+          tip: true
+        }),
+        Plot.dot(plotDataMSE.map(d => ({ ...d, modèle: "Modèle MSE" })), {
+          x: "x",
+          y: "y",
+          z: "modèle",
+          fill: "modèle"
+        }),
+        Plot.line(plotDataDTW.map(d => ({ ...d, modèle: "Modèle Soft-DTW" })), {
+          x: "x",
+          y: "y",
+          z: "modèle",
+          stroke: "modèle",
+          tip: true
+        }),
+        Plot.dot(plotDataDTW.map(d => ({ ...d, modèle: "Modèle Soft-DTW" })), {
+          x: "x",
+          y: "y",
+          z: "modèle",
+          fill: "modèle"
+        })
+      ]
+    })
+  ) : html`<p>Chargement en cours...</p>`
+```
+
+```{ojs}
+erreurs = predictionRaw?.["scores"] ?? {}
+
+Object.keys(erreurs).length > 0 ? html`
+  <div style="margin-top: 1em;">
+    <h4>Évaluation des modèles :</h4>
+    <table style="border-collapse: collapse; text-align: left;">
+      <thead>
+        <tr>
+          <th style="border-bottom: 1px solid #ccc; padding: 6px;">Modèle</th>
+          <th style="border-bottom: 1px solid #ccc; padding: 6px;">MSE (moy ± std)</th>
+          <th style="border-bottom: 1px solid #ccc; padding: 6px;">DTW (moy ± std)</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${Object.entries(erreurs).map(([nom, val]) => {
+          const mse = val?.MSE ? `${val.MSE.mean} ± ${val.MSE.std}` : "-";
+          const dtw = val?.DTW ? `${val.DTW.mean} ± ${val.DTW.std}` : "-";
+          return html`
+            <tr>
+              <td style="padding: 6px;">${nom}</td>
+              <td style="padding: 6px;">${mse}</td>
+              <td style="padding: 6px;">${dtw}</td>
+            </tr>`;
+        })}
+      </tbody>
+    </table>
+  </div>`
+: html`<p style="margin-top: 1em;">⚠️ Aucune évaluation disponible pour le moment.</p>`
+```
